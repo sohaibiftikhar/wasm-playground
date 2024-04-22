@@ -35,7 +35,9 @@ impl Cell {
 pub struct Universe {
     width: u32,
     height: u32,
-    cells: FixedBitSet,
+    buffer0: FixedBitSet,
+    buffer1: FixedBitSet,
+    active: u8,
 }
 
 #[wasm_bindgen]
@@ -46,25 +48,60 @@ impl Universe {
 
     pub fn toggle_cell(&mut self, row: u32, col: u32) {
         let idx = self.get_index(row, col);
+        let cells = self.active_buffer_mut();
         log!("Toggling cell at index: {}", idx);
-        self.cells.toggle(idx);
+        cells.toggle(idx);
+    }
+
+    fn active_buffer(&self) -> &FixedBitSet {
+        match self.active {
+            0 => &self.buffer0,
+            1 => &self.buffer1,
+            _ => panic!("Invalid active buffer"),
+        }
+    }
+
+    fn active_buffer_mut(&mut self) -> &mut FixedBitSet {
+        match self.active {
+            0 => &mut self.buffer0,
+            1 => &mut self.buffer1,
+            _ => panic!("Invalid active buffer"),
+        }
+    }
+
+    fn buffers(&mut self) -> (&FixedBitSet, &mut FixedBitSet) {
+        match self.active {
+            0 => (&self.buffer0, &mut self.buffer1),
+            1 => (&self.buffer1, &mut self.buffer0),
+            _ => panic!("Invalid active buffer"),
+        }
+    }
+
+    fn toggle_active(&mut self) {
+        self.active = 1 - self.active;
     }
 
     fn get_index(&self, row: u32, column: u32) -> usize {
         Universe::index(self.width, row, column)
     }
 
-    fn live_neighbour_count(&self, row: u32, column: u32) -> u8 {
+    fn live_neighbour_count(
+        cells: &FixedBitSet,
+        height: u32,
+        width: u32,
+        row: u32,
+        column: u32,
+    ) -> u8 {
         let mut count = 0;
-        for delta_row in [self.height - 1, 0, 1].iter().cloned() {
-            for delta_col in [self.width - 1, 0, 1].iter().cloned() {
+        for delta_row in [height - 1, 0, 1].iter().cloned() {
+            for delta_col in [width - 1, 0, 1].iter().cloned() {
                 if delta_col == 0 && delta_row == 0 {
                     continue;
                 }
-                let neighbour_row = (row + delta_row) % self.height;
-                let neighbour_col = (column + delta_col) % self.width;
-                let idx = self.get_index(neighbour_row, neighbour_col);
-                count += self.cells[idx] as u8;
+                let neighbour_row = (row + delta_row) % height;
+                let neighbour_col = (column + delta_col) % width;
+                let idx = Universe::index(width, neighbour_row, neighbour_col);
+                count += cells[idx] as u8;
             }
         }
         count
@@ -84,17 +121,18 @@ impl Universe {
 
     /// Returns an array view of the cells in the universe.
     pub fn cells(&self) -> js_sys::Uint8Array {
-        let u8_cells = self.cells.as_slice().as_ptr() as *const u8;
+        let cells = self.active_buffer();
+        let u8_cells = cells.as_slice().as_ptr() as *const u8;
         unsafe {
             // this is a reinterpret cast from *const u8 to slice<u8>
-            let slice = std::slice::from_raw_parts(u8_cells, self.cells.len() / 8);
+            let slice = std::slice::from_raw_parts(u8_cells, cells.len() / 8);
             js_sys::Uint8Array::view(slice)
         }
     }
 
     /// Invokes tick n times.
     pub fn tick_n(&mut self, times: u32) {
-        let _timer = timer::Timer::new("Universe::tick_n");
+        // let _timer = timer::Timer::new("Universe::tick_n");
         for _ in 0..times {
             self.tick();
         }
@@ -102,12 +140,15 @@ impl Universe {
 
     /// Move forward the universe by one tick using the conway game of life rules.
     pub fn tick(&mut self) {
-        let mut next = self.cells.clone();
-        for row in 0..self.height {
-            for col in 0..self.width {
-                let idx = self.get_index(row, col);
-                let cell = Cell::from_flag(self.cells[idx]);
-                let live_neighbours = self.live_neighbour_count(row, col);
+        let height = self.height;
+        let width = self.width;
+        let (cells, next) = self.buffers();
+        for row in 0..height {
+            for col in 0..width {
+                let idx = Universe::index(width, row, col);
+                let cell = Cell::from_flag(cells[idx]);
+                let live_neighbours =
+                    Universe::live_neighbour_count(cells, height, width, row, col);
                 let next_cell = match (cell, live_neighbours) {
                     (Cell::Alive, x) if x < 2 => Cell::Dead,
                     (Cell::Alive, 2) | (Cell::Alive, 3) => Cell::Alive,
@@ -118,8 +159,7 @@ impl Universe {
                 next.set(idx, next_cell.as_flag());
             }
         }
-        // No change, so we'll just set the cells to the next state.
-        self.cells = next;
+        self.toggle_active();
     }
 
     /// Randomizes the universe.
@@ -208,7 +248,9 @@ impl Universe {
         Universe {
             width,
             height,
-            cells,
+            buffer0: cells,
+            buffer1: FixedBitSet::with_capacity((width * height) as usize),
+            active: 0,
         }
     }
 
@@ -219,10 +261,11 @@ impl Universe {
 
 impl fmt::Display for Universe {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        let cells = &self.active_buffer();
         for row in 0..self.height {
             for col in 0..self.width {
                 let idx = self.get_index(row, col);
-                let symbol = if self.cells[idx] { '◼' } else { '◻' };
+                let symbol = if cells[idx] { '◼' } else { '◻' };
                 write!(f, "{}", symbol)?;
             }
         }
